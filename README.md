@@ -7,9 +7,8 @@ Service ini dibuat sebagai pengganti API face compare eksternal seperti Face++ a
 - Gratis dan open-source.
 - Bisa jalan CPU-only tanpa GPU.
 - Mudah dipanggil dari backend lain, misalnya Go Gin.
-- Cocok untuk alur absensi 1:1:
-  - foto referensi karyawan
-  - dibandingkan dengan foto absensi terbaru
+- Cocok untuk alur absensi 1:1: foto referensi karyawan dibandingkan dengan foto absensi terbaru.
+- Endpoint `/verify` dilindungi auth code melalui header `X-Auth-Code`.
 
 ---
 
@@ -19,6 +18,7 @@ Service ini dibuat sebagai pengganti API face compare eksternal seperti Face++ a
 Aplikasi Absensi / Backend Go Gin
         |
         | POST multipart/form-data
+        | Header: X-Auth-Code
         v
 Face Compare Service
         |
@@ -34,8 +34,10 @@ Flow absensi:
 1. User upload foto absensi
 2. Backend mengambil foto referensi karyawan dari server/database
 3. Backend mengirim 2 foto ke endpoint /verify
-4. Service mengembalikan similarity dan status match
-5. Backend menentukan absensi diterima atau ditolak
+4. Backend mengirim header X-Auth-Code
+5. Service memvalidasi auth code
+6. Service mengembalikan similarity dan status match
+7. Backend menentukan absensi diterima atau ditolak
 ```
 
 ---
@@ -141,13 +143,7 @@ sudo systemctl enable --now docker
 sudo docker run hello-world
 ```
 
-Jika LMDE 7 yang digunakan tidak memakai codename `trixie`, ganti bagian ini:
-
-```text
-Suites: trixie
-```
-
-sesuai hasil:
+Jika LMDE 7 yang digunakan tidak memakai codename `trixie`, ganti bagian `Suites: trixie` sesuai hasil:
 
 ```bash
 . /etc/os-release && echo "$VERSION_CODENAME"
@@ -186,11 +182,7 @@ Pastikan file model tidak berukuran sangat kecil. Jika hanya beberapa KB, kemung
 
 ## 6. Konfigurasi Environment
 
-File konfigurasi ada di:
-
-```text
-.env
-```
+File konfigurasi ada di `.env`.
 
 Contoh isi:
 
@@ -211,6 +203,8 @@ MAX_UPLOAD_MB=8
 ALLOW_MULTIPLE_FACES=false
 
 OPENCV_THREADS=1
+
+FACE_API_AUTH_CODE=ganti_dengan_kode_rahasia_panjang
 ```
 
 Penjelasan:
@@ -227,6 +221,7 @@ Penjelasan:
 | `MAX_UPLOAD_MB` | Maksimal ukuran upload per file |
 | `ALLOW_MULTIPLE_FACES` | Jika false, foto dengan lebih dari 1 wajah akan ditolak |
 | `OPENCV_THREADS` | Jumlah thread OpenCV |
+| `FACE_API_AUTH_CODE` | Auth code untuk endpoint `/verify` |
 
 Default threshold:
 
@@ -236,9 +231,47 @@ FACE_THRESHOLD=0.363
 
 Nilai ini adalah default awal untuk model SFace dengan cosine similarity. Untuk production, threshold sebaiknya dikalibrasi memakai data absensi nyata.
 
+Auth code:
+
+```env
+FACE_API_AUTH_CODE=ganti_dengan_kode_rahasia_panjang
+```
+
+Untuk production, ganti dengan string panjang/random. Contoh:
+
+```env
+FACE_API_AUTH_CODE=face_absensi_2026_X9dPq72LkA88_secret
+```
+
+Jika `FACE_API_AUTH_CODE` dikosongkan, endpoint `/verify` tidak membutuhkan auth. Untuk production, jangan kosongkan variable ini.
+
 ---
 
-## 7. Build Docker Image
+## 7. File `app/config.py`
+
+Pastikan file ini ada:
+
+```text
+app/config.py
+```
+
+Isi minimal sudah harus memiliki konfigurasi ini:
+
+```python
+face_api_auth_code: str = os.getenv("FACE_API_AUTH_CODE", "")
+```
+
+Jika mengikuti source code versi terbaru, `/health` akan menampilkan:
+
+```json
+"auth_enabled": true
+```
+
+jika `FACE_API_AUTH_CODE` sudah terbaca.
+
+---
+
+## 8. Build Docker Image
 
 Dari root project:
 
@@ -247,9 +280,15 @@ cd ~/face-compare-service
 sudo docker compose build
 ```
 
+Jika baru mengubah source code Python, gunakan rebuild tanpa cache:
+
+```bash
+sudo docker compose build --no-cache
+```
+
 ---
 
-## 8. Menjalankan Service
+## 9. Menjalankan Service
 
 Jalankan container:
 
@@ -286,7 +325,7 @@ Artinya service hanya bisa diakses dari server yang sama. Ini lebih aman untuk p
 
 ---
 
-## 9. Health Check Endpoint
+## 10. Health Check Endpoint
 
 Endpoint:
 
@@ -308,13 +347,21 @@ Contoh response:
   "service": "face-compare-service",
   "opencv_version": "4.12.0",
   "threshold": 0.363,
-  "opencv_threads": 1
+  "opencv_threads": 1,
+  "auth_enabled": true
 }
+```
+
+Keterangan:
+
+```text
+auth_enabled=true  berarti FACE_API_AUTH_CODE sudah aktif
+auth_enabled=false berarti FACE_API_AUTH_CODE kosong atau belum terbaca
 ```
 
 ---
 
-## 10. Verify Face Endpoint
+## 11. Verify Face Endpoint
 
 Endpoint:
 
@@ -328,6 +375,12 @@ Content type:
 multipart/form-data
 ```
 
+Header wajib jika `FACE_API_AUTH_CODE` diisi:
+
+```http
+X-Auth-Code: isi_auth_code_sesuai_env
+```
+
 Field:
 
 | Field | Wajib | Keterangan |
@@ -336,10 +389,11 @@ Field:
 | `probe_image` | Ya | Foto absensi terbaru |
 | `threshold` | Tidak | Override threshold dari `.env` |
 
-Contoh request:
+Contoh request dengan auth:
 
 ```bash
 curl -X POST http://127.0.0.1:8088/verify \
+  -H "X-Auth-Code: ganti_dengan_kode_rahasia_panjang" \
   -F "reference_image=@/home/ichi/test/ref.jpg" \
   -F "probe_image=@/home/ichi/test/absen.jpg"
 ```
@@ -348,14 +402,25 @@ Contoh dengan threshold manual:
 
 ```bash
 curl -X POST http://127.0.0.1:8088/verify \
+  -H "X-Auth-Code: ganti_dengan_kode_rahasia_panjang" \
   -F "reference_image=@/home/ichi/test/ref.jpg" \
   -F "probe_image=@/home/ichi/test/absen.jpg" \
   -F "threshold=0.40"
 ```
 
+Contoh request tanpa auth:
+
+```bash
+curl -X POST http://127.0.0.1:8088/verify \
+  -F "reference_image=@/home/ichi/test/ref.jpg" \
+  -F "probe_image=@/home/ichi/test/absen.jpg"
+```
+
+Jika auth aktif, request tanpa header `X-Auth-Code` akan ditolak.
+
 ---
 
-## 11. Contoh Response Berhasil
+## 12. Contoh Response Berhasil
 
 Jika wajah cocok:
 
@@ -403,7 +468,29 @@ Jika wajah tidak cocok:
 
 ---
 
-## 12. Contoh Response Error
+## 13. Contoh Response Error
+
+Jika auth code tidak dikirim:
+
+```json
+{
+  "detail": {
+    "error": "AUTH_CODE_REQUIRED",
+    "message": "Header X-Auth-Code wajib dikirim."
+  }
+}
+```
+
+Jika auth code salah:
+
+```json
+{
+  "detail": {
+    "error": "INVALID_AUTH_CODE",
+    "message": "Auth code tidak valid."
+  }
+}
+```
 
 Jika gambar tidak valid:
 
@@ -440,7 +527,7 @@ Jika terdeteksi lebih dari satu wajah:
 
 ---
 
-## 13. Integrasi dengan Backend Go Gin
+## 14. Integrasi dengan Backend Go Gin
 
 Tambahkan `.env` di aplikasi Go:
 
@@ -448,6 +535,7 @@ Tambahkan `.env` di aplikasi Go:
 FACE_COMPARE_PROVIDER=opencv_sface
 FACE_COMPARE_URL=http://127.0.0.1:8088/verify
 FACE_COMPARE_THRESHOLD=0.363
+FACE_COMPARE_AUTH_CODE=ganti_dengan_kode_rahasia_panjang
 ```
 
 Flow backend:
@@ -456,9 +544,17 @@ Flow backend:
 1. Ambil path foto referensi karyawan dari database
 2. Ambil path foto absensi yang baru diupload
 3. Kirim keduanya ke FACE_COMPARE_URL
-4. Baca response JSON
-5. Jika match=true, absensi diterima
-6. Simpan similarity_score dan threshold_used ke database
+4. Tambahkan header X-Auth-Code
+5. Baca response JSON
+6. Jika match=true, absensi diterima
+7. Simpan similarity_score dan threshold_used ke database
+```
+
+Contoh header di Go:
+
+```go
+req.Header.Set("Content-Type", writer.FormDataContentType())
+req.Header.Set("X-Auth-Code", os.Getenv("FACE_COMPARE_AUTH_CODE"))
 ```
 
 Data yang disarankan disimpan di tabel absensi:
@@ -474,13 +570,15 @@ face_probe_path
 
 ---
 
-## 14. Contoh Curl dari Backend / Terminal
+## 15. Contoh Curl dari Backend / Terminal
 
 ```bash
 REFERENCE_IMAGE="/path/foto_karyawan.jpg"
 PROBE_IMAGE="/path/foto_absensi.jpg"
+AUTH_CODE="ganti_dengan_kode_rahasia_panjang"
 
 curl -X POST http://127.0.0.1:8088/verify \
+  -H "X-Auth-Code: ${AUTH_CODE}" \
   -F "reference_image=@${REFERENCE_IMAGE}" \
   -F "probe_image=@${PROBE_IMAGE}"
 ```
@@ -491,8 +589,10 @@ Dengan threshold dari environment:
 REFERENCE_IMAGE="/path/foto_karyawan.jpg"
 PROBE_IMAGE="/path/foto_absensi.jpg"
 THRESHOLD="0.363"
+AUTH_CODE="ganti_dengan_kode_rahasia_panjang"
 
 curl -X POST http://127.0.0.1:8088/verify \
+  -H "X-Auth-Code: ${AUTH_CODE}" \
   -F "reference_image=@${REFERENCE_IMAGE}" \
   -F "probe_image=@${PROBE_IMAGE}" \
   -F "threshold=${THRESHOLD}"
@@ -500,7 +600,7 @@ curl -X POST http://127.0.0.1:8088/verify \
 
 ---
 
-## 15. Operasional Docker
+## 16. Operasional Docker
 
 Start service:
 
@@ -542,7 +642,7 @@ sudo docker compose up -d
 
 ---
 
-## 16. Update Konfigurasi
+## 17. Update Konfigurasi
 
 Jika mengubah `.env`, restart container:
 
@@ -558,9 +658,21 @@ sudo docker compose build --no-cache
 sudo docker compose up -d
 ```
 
+Untuk memastikan auth sudah aktif:
+
+```bash
+curl http://127.0.0.1:8088/health
+```
+
+Pastikan response berisi:
+
+```json
+"auth_enabled": true
+```
+
 ---
 
-## 17. Catatan Threshold
+## 18. Catatan Threshold
 
 Default awal:
 
@@ -590,7 +702,7 @@ Lebih longgar : 0.34 - 0.35
 
 ---
 
-## 18. Catatan Keamanan
+## 19. Catatan Keamanan
 
 Untuk production, jangan expose service ini langsung ke internet.
 
@@ -609,6 +721,12 @@ ports:
   - "127.0.0.1:8088:8088"
 ```
 
+Endpoint `/verify` juga dilindungi header:
+
+```http
+X-Auth-Code: isi_auth_code_sesuai_env
+```
+
 Jika service harus dipanggil dari server lain, gunakan salah satu:
 
 ```text
@@ -621,9 +739,9 @@ Jika service harus dipanggil dari server lain, gunakan salah satu:
 
 ---
 
-## 19. Troubleshooting
+## 20. Troubleshooting
 
-### 19.1 Container tidak jalan
+### 20.1 Container tidak jalan
 
 Cek log:
 
@@ -631,7 +749,32 @@ Cek log:
 sudo docker logs -f face-compare-service
 ```
 
-### 19.2 Model tidak ditemukan
+### 20.2 Error: Could not import module `app.main`
+
+Cek struktur file:
+
+```bash
+find . -maxdepth 3 -type f | sort
+```
+
+Pastikan file ini ada:
+
+```text
+app/__init__.py
+app/config.py
+app/face_service.py
+app/main.py
+```
+
+Setelah itu rebuild:
+
+```bash
+sudo docker compose down
+sudo docker compose build --no-cache
+sudo docker compose up -d
+```
+
+### 20.3 Model tidak ditemukan
 
 Error contoh:
 
@@ -652,7 +795,7 @@ models/face_detection_yunet_2023mar.onnx
 models/face_recognition_sface_2021dec.onnx
 ```
 
-Jika belum ada, download ulang:
+Jika belum ada, download ulang lalu rebuild:
 
 ```bash
 wget -O models/face_detection_yunet_2023mar.onnx \
@@ -660,16 +803,12 @@ https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/face_d
 
 wget -O models/face_recognition_sface_2021dec.onnx \
 https://github.com/opencv/opencv_zoo/raw/main/models/face_recognition_sface/face_recognition_sface_2021dec.onnx
-```
 
-Lalu rebuild:
-
-```bash
 sudo docker compose build --no-cache
 sudo docker compose up -d
 ```
 
-### 19.3 Health check gagal
+### 20.4 Health check gagal
 
 Cek apakah container berjalan:
 
@@ -683,7 +822,70 @@ Cek port:
 curl http://127.0.0.1:8088/health
 ```
 
-### 19.4 Wajah tidak terdeteksi
+### 20.5 Auth belum aktif
+
+Cek `.env`:
+
+```bash
+cat .env
+```
+
+Pastikan ada:
+
+```env
+FACE_API_AUTH_CODE=ganti_dengan_kode_rahasia_panjang
+```
+
+Restart container:
+
+```bash
+sudo docker compose restart
+```
+
+Cek health:
+
+```bash
+curl http://127.0.0.1:8088/health
+```
+
+Jika `auth_enabled` masih `false`, rebuild:
+
+```bash
+sudo docker compose down
+sudo docker compose build --no-cache
+sudo docker compose up -d
+```
+
+### 20.6 Request `/verify` selalu 401
+
+Pastikan request mengirim header:
+
+```http
+X-Auth-Code: isi_auth_code_sesuai_env
+```
+
+Contoh:
+
+```bash
+curl -X POST http://127.0.0.1:8088/verify \
+  -H "X-Auth-Code: ganti_dengan_kode_rahasia_panjang" \
+  -F "reference_image=@ref.jpg" \
+  -F "probe_image=@absen.jpg"
+```
+
+### 20.7 Request `/verify` selalu 403
+
+Artinya `X-Auth-Code` dikirim, tapi nilainya tidak sama dengan `FACE_API_AUTH_CODE` di `.env`.
+
+Cek nilai `.env`:
+
+```bash
+grep FACE_API_AUTH_CODE .env
+```
+
+Lalu cocokkan dengan header request.
+
+### 20.8 Wajah tidak terdeteksi
 
 Kemungkinan:
 
@@ -697,7 +899,7 @@ Kemungkinan:
 
 Coba gunakan foto dengan wajah lebih jelas.
 
-### 19.5 Terdeteksi lebih dari satu wajah
+### 20.9 Terdeteksi lebih dari satu wajah
 
 Secara default:
 
@@ -719,7 +921,7 @@ Lalu restart:
 sudo docker compose restart
 ```
 
-### 19.6 Service berat saat jam masuk kantor
+### 20.10 Service berat saat jam masuk kantor
 
 Cek resource:
 
@@ -739,7 +941,7 @@ Opsi optimasi:
 
 ---
 
-## 20. Lisensi
+## 21. Lisensi
 
 Project microservice ini menggunakan library OpenCV dan model ONNX dari OpenCV Zoo.
 
@@ -747,12 +949,12 @@ Sebelum production skala besar, pastikan kembali lisensi model dan library yang 
 
 ---
 
-## 21. Endpoint Ringkas
+## 22. Endpoint Ringkas
 
-| Method | Endpoint | Fungsi |
-|---|---|---|
-| GET | `/health` | Cek status service |
-| POST | `/verify` | Compare wajah 1:1 |
+| Method | Endpoint | Auth | Fungsi |
+|---|---|---|---|
+| GET | `/health` | Tidak | Cek status service |
+| POST | `/verify` | `X-Auth-Code` jika aktif | Compare wajah 1:1 |
 
 Field endpoint `/verify`:
 
@@ -766,6 +968,7 @@ Contoh paling singkat:
 
 ```bash
 curl -X POST http://127.0.0.1:8088/verify \
+  -H "X-Auth-Code: ganti_dengan_kode_rahasia_panjang" \
   -F "reference_image=@ref.jpg" \
   -F "probe_image=@absen.jpg"
 ```
