@@ -1,0 +1,14 @@
+services:
+  face-compare:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: face-compare-service:latest
+    container_name: face-compare-service
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "127.0.0.1:8088:8088"
+    mem_limit: 512m
+    cpus: "1.5"
