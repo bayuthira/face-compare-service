@@ -8,7 +8,7 @@ Service ini dibuat sebagai pengganti API face compare eksternal seperti Face++ a
 - Bisa jalan CPU-only tanpa GPU.
 - Mudah dipanggil dari backend lain, misalnya Go Gin.
 - Cocok untuk alur absensi 1:1: foto referensi karyawan dibandingkan dengan foto absensi terbaru.
-- Endpoint `/verify` dilindungi auth code melalui header `X-Auth-Code`.
+- Endpoint `POST /verify`, `POST /extract`, dan `POST /verify-embedding` dilindungi auth code melalui header `X-Auth-Code`.
 
 ---
 
@@ -33,11 +33,13 @@ Flow absensi:
 ```text
 1. User upload foto absensi
 2. Backend mengambil foto referensi karyawan dari server/database
-3. Backend mengirim 2 foto ke endpoint /verify
-4. Backend mengirim header X-Auth-Code
-5. Service memvalidasi auth code
-6. Service mengembalikan similarity dan status match
-7. Backend menentukan absensi diterima atau ditolak
+3. Backend bisa ekstrak embedding dari foto referensi lewat endpoint /extract
+4. Backend bisa verifikasi embedding referensi vs foto absensi lewat endpoint /verify-embedding
+5. Alternatif tetap bisa mengirim 2 foto langsung ke endpoint /verify
+6. Backend mengirim header X-Auth-Code
+7. Service memvalidasi auth code
+8. Service mengembalikan similarity dan status match
+9. Backend menentukan absensi diterima atau ditolak
 ```
 
 ---
@@ -221,7 +223,7 @@ Penjelasan:
 | `MAX_UPLOAD_MB` | Maksimal ukuran upload per file |
 | `ALLOW_MULTIPLE_FACES` | Jika false, foto dengan lebih dari 1 wajah akan ditolak |
 | `OPENCV_THREADS` | Jumlah thread OpenCV |
-| `FACE_API_AUTH_CODE` | Auth code untuk endpoint `/verify` |
+| `FACE_API_AUTH_CODE` | Auth code untuk endpoint `/verify`, `/extract`, dan `/verify-embedding` |
 
 Default threshold:
 
@@ -361,7 +363,108 @@ auth_enabled=false berarti FACE_API_AUTH_CODE kosong atau belum terbaca
 
 ---
 
-## 11. Verify Face Endpoint
+## 11. Extract Embedding Endpoint
+
+Endpoint:
+
+```http
+POST /extract
+```
+
+Content type:
+
+```text
+multipart/form-data
+```
+
+Header wajib jika `FACE_API_AUTH_CODE` diisi:
+
+```http
+X-Auth-Code: isi_auth_code_sesuai_env
+```
+
+Field:
+
+| Field | Wajib | Keterangan |
+|---|---:|---|
+| `image` | Ya | Foto wajah untuk diekstrak menjadi embedding |
+
+Contoh request:
+
+```bash
+curl -X POST http://127.0.0.1:8088/extract \
+  -H "X-Auth-Code: ganti_dengan_kode_rahasia_panjang" \
+  -F "image=@/home/ichi/test/ref.jpg"
+```
+
+Contoh response:
+
+```json
+{
+  "embedding": [0.01234567, -0.02345678, 0.03456789],
+  "embedding_size": 128,
+  "face": {
+    "face_count": 1,
+    "box": [120.0, 80.0, 180.0, 180.0],
+    "score": 0.998123
+  }
+}
+```
+
+`embedding` dari endpoint ini bisa dipakai sebagai `reference_embedding` pada endpoint `/verify-embedding`.
+
+---
+
+## 12. Verify Embedding Endpoint
+
+Endpoint:
+
+```http
+POST /verify-embedding
+```
+
+Content type:
+
+```text
+multipart/form-data
+```
+
+Header wajib jika `FACE_API_AUTH_CODE` diisi:
+
+```http
+X-Auth-Code: isi_auth_code_sesuai_env
+```
+
+Field:
+
+| Field | Wajib | Keterangan |
+|---|---:|---|
+| `reference_embedding` | Ya | Embedding referensi dalam format JSON array angka |
+| `probe_image` | Ya | Foto absensi terbaru |
+| `threshold` | Tidak | Override threshold dari `.env` |
+
+Contoh request:
+
+```bash
+curl -X POST http://127.0.0.1:8088/verify-embedding \
+  -H "X-Auth-Code: ganti_dengan_kode_rahasia_panjang" \
+  -F 'reference_embedding=[0.01234567,-0.02345678,0.03456789]' \
+  -F "probe_image=@/home/ichi/test/absen.jpg"
+```
+
+Contoh dengan threshold manual:
+
+```bash
+curl -X POST http://127.0.0.1:8088/verify-embedding \
+  -H "X-Auth-Code: ganti_dengan_kode_rahasia_panjang" \
+  -F 'reference_embedding=[0.01234567,-0.02345678,0.03456789]' \
+  -F "probe_image=@/home/ichi/test/absen.jpg" \
+  -F "threshold=0.40"
+```
+
+---
+
+## 13. Verify Face Endpoint
 
 Endpoint:
 
@@ -420,7 +523,7 @@ Jika auth aktif, request tanpa header `X-Auth-Code` akan ditolak.
 
 ---
 
-## 12. Contoh Response Berhasil
+## 14. Contoh Response Berhasil
 
 Jika wajah cocok:
 
@@ -468,7 +571,7 @@ Jika wajah tidak cocok:
 
 ---
 
-## 13. Contoh Response Error
+## 15. Contoh Response Error
 
 Jika auth code tidak dikirim:
 

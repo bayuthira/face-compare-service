@@ -35,6 +35,10 @@ class ModelNotFoundError(FaceServiceError):
     error_code = "MODEL_NOT_FOUND"
 
 
+class InvalidEmbeddingError(FaceServiceError):
+    error_code = "INVALID_EMBEDDING"
+
+
 @dataclass
 class FaceInfo:
     face_count: int
@@ -48,8 +52,9 @@ class CompareResult:
     similarity: float
     threshold: float
     distance_l2: float
-    reference_face: FaceInfo
+    reference_face: FaceInfo | None
     probe_face: FaceInfo
+    probe_embedding: list[float] | None = None
 
 
 class FaceCompareService:
@@ -161,6 +166,35 @@ class FaceCompareService:
 
         return feature, face_info
 
+    def _normalize_embedding(self, embedding: list[float]) -> np.ndarray:
+        if not embedding:
+            raise InvalidEmbeddingError("Field reference_embedding tidak boleh kosong.")
+
+        try:
+            feature = np.asarray(embedding, dtype=np.float32).reshape(1, -1)
+        except ValueError:
+            raise InvalidEmbeddingError(
+                "Field reference_embedding harus berupa array angka desimal."
+            )
+
+        if feature.size == 0:
+            raise InvalidEmbeddingError("Field reference_embedding tidak boleh kosong.")
+
+        if not np.isfinite(feature).all():
+            raise InvalidEmbeddingError(
+                "Field reference_embedding mengandung nilai tidak valid."
+            )
+
+        return feature
+
+    def extract_embedding_bytes(self, image_bytes: bytes) -> tuple[np.ndarray, FaceInfo]:
+        image = self._decode_image(image_bytes)
+
+        with self._lock:
+            feature, face_info = self._extract_feature(image)
+
+        return feature, face_info
+
     def compare_bytes(
         self,
         reference_image_bytes: bytes,
@@ -199,24 +233,85 @@ class FaceCompareService:
             distance_l2=distance_l2,
             reference_face=reference_face,
             probe_face=probe_face,
+            probe_embedding=self.embedding_to_list(probe_feature),
+        )
+
+    def compare_embedding_with_probe_bytes(
+        self,
+        reference_embedding: list[float],
+        probe_image_bytes: bytes,
+        threshold: float | None = None,
+    ) -> CompareResult:
+        if threshold is None:
+            threshold = self.settings.face_threshold
+
+        reference_feature = self._normalize_embedding(reference_embedding)
+        probe_image = self._decode_image(probe_image_bytes)
+
+        try:
+            with self._lock:
+                probe_feature, probe_face = self._extract_feature(probe_image)
+
+                similarity = self.recognizer.match(
+                    reference_feature,
+                    probe_feature,
+                    cv.FaceRecognizerSF_FR_COSINE,
+                )
+
+                distance_l2 = self.recognizer.match(
+                    reference_feature,
+                    probe_feature,
+                    cv.FaceRecognizerSF_FR_NORM_L2,
+                )
+        except cv.error:
+            raise InvalidEmbeddingError(
+                "Format reference_embedding tidak valid atau dimensi tidak sesuai model."
+            )
+
+        similarity = float(similarity)
+        distance_l2 = float(distance_l2)
+
+        return CompareResult(
+            match=similarity >= threshold,
+            similarity=similarity,
+            threshold=float(threshold),
+            distance_l2=distance_l2,
+            reference_face=None,
+            probe_face=probe_face,
         )
 
     @staticmethod
-    def result_to_dict(result: CompareResult) -> dict[str, Any]:
-        return {
+    def embedding_to_list(feature: np.ndarray) -> list[float]:
+        return [round(float(value), 8) for value in feature.flatten()]
+
+    @staticmethod
+    def result_to_dict(
+        result: CompareResult,
+        include_probe_embedding: bool = False,
+    ) -> dict[str, Any]:
+        probe_face_payload: dict[str, Any] = {
+            "face_count": result.probe_face.face_count,
+            "box": result.probe_face.box,
+            "score": round(result.probe_face.score, 6),
+        }
+
+        if include_probe_embedding and result.probe_embedding is not None:
+            probe_face_payload["embedding"] = result.probe_embedding
+
+        payload = {
             "match": result.match,
             "similarity": round(result.similarity, 6),
             "threshold": result.threshold,
             "distance_l2": round(result.distance_l2, 6),
             "message": "same person" if result.match else "different person",
-            "reference_face": {
+            "probe_face": probe_face_payload,
+        }
+
+        if result.reference_face is not None:
+            payload["reference_face"] = {
                 "face_count": result.reference_face.face_count,
                 "box": result.reference_face.box,
                 "score": round(result.reference_face.score, 6),
-            },
-            "probe_face": {
-                "face_count": result.probe_face.face_count,
-                "box": result.probe_face.box,
-                "score": round(result.probe_face.score, 6),
-            },
-        }
+            }
+
+        return payload

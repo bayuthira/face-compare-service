@@ -1,4 +1,5 @@
 import secrets
+import json
 
 import cv2 as cv
 from fastapi import FastAPI, Header, HTTPException, Request
@@ -84,6 +85,80 @@ def validate_request_has_body(request: Request) -> None:
         )
 
 
+def parse_threshold_value(threshold_value: object) -> float | None:
+    if threshold_value in (None, ""):
+        return None
+
+    try:
+        return float(str(threshold_value))
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "THRESHOLD_INVALID",
+                "message": "Field threshold harus berupa angka, contoh: 0.363.",
+            },
+        )
+
+
+def parse_reference_embedding(raw_value: object) -> list[float]:
+    if raw_value in (None, ""):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "REFERENCE_EMBEDDING_REQUIRED",
+                "message": "Field reference_embedding wajib dikirim.",
+            },
+        )
+
+    if hasattr(raw_value, "read"):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "REFERENCE_EMBEDDING_INVALID",
+                "message": "Field reference_embedding harus berupa text JSON array, bukan file.",
+            },
+        )
+
+    try:
+        payload = json.loads(str(raw_value))
+    except json.JSONDecodeError:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "REFERENCE_EMBEDDING_INVALID",
+                "message": "Field reference_embedding harus berupa JSON array angka.",
+            },
+        )
+
+    if isinstance(payload, dict) and "embedding" in payload:
+        payload = payload["embedding"]
+
+    if not isinstance(payload, list):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "REFERENCE_EMBEDDING_INVALID",
+                "message": "Field reference_embedding harus berupa JSON array angka.",
+            },
+        )
+
+    embedding: list[float] = []
+    try:
+        for value in payload:
+            embedding.append(float(value))
+    except (TypeError, ValueError):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "REFERENCE_EMBEDDING_INVALID",
+                "message": "Field reference_embedding hanya boleh berisi angka.",
+            },
+        )
+
+    return embedding
+
+
 @app.get("/health")
 def health():
     return {
@@ -95,6 +170,82 @@ def health():
         "opencv_threads": settings.opencv_threads,
         "auth_enabled": settings.face_api_auth_code != "",
     }
+
+
+@app.post("/extract")
+async def extract(
+    request: Request,
+    x_auth_code: str | None = Header(default=None, alias="X-Auth-Code"),
+):
+    verify_auth_code(x_auth_code)
+
+    validate_request_has_body(request)
+
+    try:
+        form = await request.form()
+        image = form.get("image")
+
+        if image is None:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "IMAGE_REQUIRED",
+                    "message": "Field image wajib dikirim.",
+                },
+            )
+
+        if not hasattr(image, "read"):
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "IMAGE_INVALID",
+                    "message": "Field image harus berupa file.",
+                },
+            )
+
+        image_bytes = await image.read()
+
+        if len(image_bytes) == 0:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "IMAGE_EMPTY",
+                    "message": "File image kosong.",
+                },
+            )
+
+        embedding, face_info = face_service.extract_embedding_bytes(image_bytes)
+
+        return {
+            "embedding": face_service.embedding_to_list(embedding),
+            "embedding_size": int(embedding.size),
+            "face": {
+                "face_count": face_info.face_count,
+                "box": face_info.box,
+                "score": round(face_info.score, 6),
+            },
+        }
+
+    except HTTPException:
+        raise
+
+    except FaceServiceError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail={
+                "error": exc.error_code,
+                "message": exc.message,
+            },
+        )
+
+    except Exception as exc:
+        return JSONResponse(
+            status_code=500,
+            content={
+                "error": "INTERNAL_SERVER_ERROR",
+                "message": str(exc),
+            },
+        )
 
 
 @app.post("/verify")
@@ -149,18 +300,7 @@ async def verify(
                 },
             )
 
-        threshold = None
-        if threshold_value not in (None, ""):
-            try:
-                threshold = float(str(threshold_value))
-            except ValueError:
-                raise HTTPException(
-                    status_code=400,
-                    detail={
-                        "error": "THRESHOLD_INVALID",
-                        "message": "Field threshold harus berupa angka, contoh: 0.363.",
-                    },
-                )
+        threshold = parse_threshold_value(threshold_value)
 
         reference_bytes = await reference_image.read()
         probe_bytes = await probe_image.read()
@@ -185,6 +325,84 @@ async def verify(
 
         result = face_service.compare_bytes(
             reference_image_bytes=reference_bytes,
+            probe_image_bytes=probe_bytes,
+            threshold=threshold,
+        )
+
+        return face_service.result_to_dict(result, include_probe_embedding=True)
+
+    except HTTPException:
+        raise
+
+    except FaceServiceError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail={
+                "error": exc.error_code,
+                "message": exc.message,
+            },
+        )
+
+    except Exception as exc:
+        return JSONResponse(
+            status_code=500,
+            content={
+                "error": "INTERNAL_SERVER_ERROR",
+                "message": str(exc),
+            },
+        )
+
+
+@app.post("/verify-embedding")
+async def verify_embedding(
+    request: Request,
+    x_auth_code: str | None = Header(default=None, alias="X-Auth-Code"),
+):
+    verify_auth_code(x_auth_code)
+
+    validate_request_has_body(request)
+
+    try:
+        form = await request.form()
+
+        reference_embedding_raw = form.get("reference_embedding")
+        probe_image = form.get("probe_image")
+        threshold_value = form.get("threshold")
+
+        if probe_image is None:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "PROBE_IMAGE_REQUIRED",
+                    "message": "Field probe_image wajib dikirim.",
+                },
+            )
+
+        if not hasattr(probe_image, "read"):
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "PROBE_IMAGE_INVALID",
+                    "message": "Field probe_image harus berupa file.",
+                },
+            )
+
+        reference_embedding = parse_reference_embedding(reference_embedding_raw)
+        threshold = parse_threshold_value(threshold_value)
+
+        probe_bytes = await probe_image.read()
+
+        if len(probe_bytes) == 0:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "PROBE_IMAGE_EMPTY",
+                    "message": "File probe_image kosong.",
+                },
+            )
+
+        result = face_service.compare_embedding_with_probe_bytes(
+            reference_embedding=reference_embedding,
             probe_image_bytes=probe_bytes,
             threshold=threshold,
         )
