@@ -541,6 +541,7 @@ Jika wajah cocok:
   },
   "probe_face": {
     "face_count": 1,
+    "embedding": [0.01234567, -0.02345678, 0.03456789],
     "box": [100.0, 70.0, 175.0, 175.0],
     "score": 0.997456
   }
@@ -563,6 +564,7 @@ Jika wajah tidak cocok:
   },
   "probe_face": {
     "face_count": 1,
+    "embedding": [0.01234567, -0.02345678, 0.03456789],
     "box": [100.0, 70.0, 175.0, 175.0],
     "score": 0.997456
   }
