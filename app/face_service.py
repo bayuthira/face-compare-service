@@ -278,6 +278,7 @@ class FaceCompareService:
             distance_l2=distance_l2,
             reference_face=None,
             probe_face=probe_face,
+            probe_embedding=self.embedding_to_list(probe_feature),
         )
 
     @staticmethod

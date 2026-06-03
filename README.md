@@ -462,6 +462,24 @@ curl -X POST http://127.0.0.1:8088/verify-embedding \
   -F "threshold=0.40"
 ```
 
+Contoh response:
+
+```json
+{
+  "match": true,
+  "similarity": 0.512345,
+  "threshold": 0.363,
+  "distance_l2": 0.982345,
+  "message": "same person",
+  "probe_face": {
+    "face_count": 1,
+    "embedding": [0.01234567, -0.02345678, 0.03456789],
+    "box": [100.0, 70.0, 175.0, 175.0],
+    "score": 0.997456
+  }
+}
+```
+
 ---
 
 ## 13. Verify Face Endpoint

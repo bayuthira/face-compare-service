@@ -407,7 +407,7 @@ async def verify_embedding(
             threshold=threshold,
         )
 
-        return face_service.result_to_dict(result)
+        return face_service.result_to_dict(result, include_probe_embedding=True)
 
     except HTTPException:
         raise
